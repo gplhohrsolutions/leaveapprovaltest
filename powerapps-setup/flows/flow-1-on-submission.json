@@ -1,0 +1,221 @@
+{
+  "_comment": "Power Automate Flow: Leave Request Submitted / Resubmitted",
+  "_trigger": "SharePoint - When an item is created OR modified (LeaveRequests list)",
+  "_triggerFilter": "Status eq 'Pending'",
+  "_note": "Build this in Power Automate using the steps below. Each object = one action block.",
+
+  "trigger": {
+    "type": "SharePoint - When an item is created or modified",
+    "settings": {
+      "siteAddress": "YOUR_SHAREPOINT_SITE_URL",
+      "listName": "LeaveRequests",
+      "triggerCondition": "triggerOutputs()?['body/Status/Value'] eq 'Pending'"
+    }
+  },
+
+  "actions": [
+
+    {
+      "step": 1,
+      "name": "Get_Employee_Profile",
+      "type": "Office 365 Users - Get user profile (V2)",
+      "inputs": {
+        "userId": "@triggerOutputs()?['body/EmployeeEmail']"
+      },
+      "outputs_used": ["jobTitle", "mail", "displayName", "managerEmail"]
+    },
+
+    {
+      "step": 2,
+      "name": "Get_Manager_Profile",
+      "type": "Office 365 Users - Get manager (V2)",
+      "inputs": {
+        "userId": "@triggerOutputs()?['body/EmployeeEmail']"
+      },
+      "outputs_used": ["mail", "displayName"]
+    },
+
+    {
+      "step": 3,
+      "name": "Update_ManagerEmail_On_Request",
+      "type": "SharePoint - Update item",
+      "inputs": {
+        "siteAddress": "YOUR_SHAREPOINT_SITE_URL",
+        "listName": "LeaveRequests",
+        "id": "@triggerOutputs()?['body/ID']",
+        "ManagerEmail": "@outputs('Get_Manager_Profile')?['body/mail']"
+      }
+    },
+
+    {
+      "step": 4,
+      "name": "Log_Submitted_Or_Revised",
+      "type": "SharePoint - Create item",
+      "inputs": {
+        "siteAddress": "YOUR_SHAREPOINT_SITE_URL",
+        "listName": "LeaveAuditLog",
+        "Title": "Log entry",
+        "RequestId": "@triggerOutputs()?['body/ID']",
+        "LogAction": {
+          "Value": "@if(greater(triggerOutputs()?['body/RevisionCount'], 0), 'Revised', 'Submitted')"
+        },
+        "ActorEmail": "@triggerOutputs()?['body/EmployeeEmail']",
+        "LogTimestamp": "@utcNow()",
+        "LogNotes": "@concat(triggerOutputs()?['body/LeaveType/Value'], ' — ', triggerOutputs()?['body/WorkingDays'], ' days')"
+      }
+    },
+
+    {
+      "step": 5,
+      "name": "Post_Adaptive_Card_To_Manager",
+      "type": "Microsoft Teams - Post an Adaptive Card and wait for a response",
+      "inputs": {
+        "recipient": "@outputs('Get_Manager_Profile')?['body/mail']",
+        "messageBody": {
+          "type": "AdaptiveCard",
+          "version": "1.4",
+          "body": [
+            { "type": "TextBlock", "size": "Large", "weight": "Bolder", "text": "Leave Approval Request" },
+            { "type": "FactSet", "facts": [
+              { "title": "Employee",     "value": "@{triggerOutputs()?['body/LeaveEmployee/displayName']}" },
+              { "title": "Leave Type",   "value": "@{triggerOutputs()?['body/LeaveType/Value']}" },
+              { "title": "From",         "value": "@{formatDateTime(triggerOutputs()?['body/FromDate'], 'ddd dd MMM yyyy')}" },
+              { "title": "To",           "value": "@{formatDateTime(triggerOutputs()?['body/ToDate'], 'ddd dd MMM yyyy')}" },
+              { "title": "Working Days", "value": "@{triggerOutputs()?['body/WorkingDays']}" },
+              { "title": "Reason",       "value": "@{if(empty(triggerOutputs()?['body/Reason']), 'Not provided', triggerOutputs()?['body/Reason'])}" }
+            ]},
+            {
+              "type": "Input.Text",
+              "id": "managerComment",
+              "placeholder": "Add a comment (required for rejection)...",
+              "isMultiline": true
+            }
+          ],
+          "actions": [
+            { "type": "Action.Submit", "title": "✅ Approve", "data": { "decision": "Approved" } },
+            { "type": "Action.Submit", "title": "❌ Reject",  "data": { "decision": "Rejected" } }
+          ]
+        },
+        "updateMessage": "Response recorded. Thank you."
+      },
+      "outputs_used": ["body/data/decision", "body/data/managerComment", "body/responder/email"]
+    },
+
+    {
+      "step": 6,
+      "name": "Condition_Approved_Or_Rejected",
+      "type": "Control - Condition",
+      "expression": "@equals(outputs('Post_Adaptive_Card_To_Manager')?['body/data/decision'], 'Approved')",
+
+      "if_true": [
+
+        {
+          "step": "6a",
+          "name": "Update_Request_Approved",
+          "type": "SharePoint - Update item",
+          "inputs": {
+            "siteAddress": "YOUR_SHAREPOINT_SITE_URL",
+            "listName": "LeaveRequests",
+            "id": "@triggerOutputs()?['body/ID']",
+            "Status": { "Value": "Approved" },
+            "ManagerComment": "@outputs('Post_Adaptive_Card_To_Manager')?['body/data/managerComment']"
+          }
+        },
+
+        {
+          "step": "6b",
+          "name": "Get_Current_LeaveBalance",
+          "type": "SharePoint - Get items",
+          "inputs": {
+            "siteAddress": "YOUR_SHAREPOINT_SITE_URL",
+            "listName": "LeaveBalance",
+            "filterQuery": "EmployeeEmail eq '@{triggerOutputs()?['body/EmployeeEmail']}' and BalanceYear eq @{utcNow('yyyy')}"
+          }
+        },
+
+        {
+          "step": "6c",
+          "name": "Update_LeaveBalance_UsedDays",
+          "type": "SharePoint - Update item",
+          "inputs": {
+            "siteAddress": "YOUR_SHAREPOINT_SITE_URL",
+            "listName": "LeaveBalance",
+            "id": "@first(outputs('Get_Current_LeaveBalance')?['body/value'])?['ID']",
+            "UsedDays": "@add(first(outputs('Get_Current_LeaveBalance')?['body/value'])?['UsedDays'], triggerOutputs()?['body/WorkingDays'])"
+          }
+        },
+
+        {
+          "step": "6d",
+          "name": "Log_Approved",
+          "type": "SharePoint - Create item",
+          "inputs": {
+            "siteAddress": "YOUR_SHAREPOINT_SITE_URL",
+            "listName": "LeaveAuditLog",
+            "Title": "Log entry",
+            "RequestId": "@triggerOutputs()?['body/ID']",
+            "LogAction": { "Value": "Approved" },
+            "ActorEmail": "@outputs('Post_Adaptive_Card_To_Manager')?['body/responder/email']",
+            "LogTimestamp": "@utcNow()",
+            "LogNotes": "@outputs('Post_Adaptive_Card_To_Manager')?['body/data/managerComment']"
+          }
+        },
+
+        {
+          "step": "6e",
+          "name": "Notify_Employee_Approved",
+          "type": "Microsoft Teams - Post a message in a chat or channel",
+          "inputs": {
+            "recipient": "@triggerOutputs()?['body/EmployeeEmail']",
+            "message": "✅ Your @{triggerOutputs()?['body/LeaveType/Value']} request (@{triggerOutputs()?['body/WorkingDays']} days, @{formatDateTime(triggerOutputs()?['body/FromDate'], 'dd MMM')} – @{formatDateTime(triggerOutputs()?['body/ToDate'], 'dd MMM')}) has been **approved** by @{outputs('Get_Manager_Profile')?['body/displayName']}. @{if(empty(outputs('Post_Adaptive_Card_To_Manager')?['body/data/managerComment']), '', concat('Note: ', outputs('Post_Adaptive_Card_To_Manager')?['body/data/managerComment']))}"
+          }
+        }
+
+      ],
+
+      "if_false": [
+
+        {
+          "step": "6f",
+          "name": "Update_Request_Rejected",
+          "type": "SharePoint - Update item",
+          "inputs": {
+            "siteAddress": "YOUR_SHAREPOINT_SITE_URL",
+            "listName": "LeaveRequests",
+            "id": "@triggerOutputs()?['body/ID']",
+            "Status": { "Value": "Rejected" },
+            "ManagerComment": "@outputs('Post_Adaptive_Card_To_Manager')?['body/data/managerComment']"
+          }
+        },
+
+        {
+          "step": "6g",
+          "name": "Log_Rejected",
+          "type": "SharePoint - Create item",
+          "inputs": {
+            "siteAddress": "YOUR_SHAREPOINT_SITE_URL",
+            "listName": "LeaveAuditLog",
+            "Title": "Log entry",
+            "RequestId": "@triggerOutputs()?['body/ID']",
+            "LogAction": { "Value": "Rejected" },
+            "ActorEmail": "@outputs('Post_Adaptive_Card_To_Manager')?['body/responder/email']",
+            "LogTimestamp": "@utcNow()",
+            "LogNotes": "@outputs('Post_Adaptive_Card_To_Manager')?['body/data/managerComment']"
+          }
+        },
+
+        {
+          "step": "6h",
+          "name": "Notify_Employee_Rejected",
+          "type": "Microsoft Teams - Post a message in a chat or channel",
+          "inputs": {
+            "recipient": "@triggerOutputs()?['body/EmployeeEmail']",
+            "message": "❌ Your @{triggerOutputs()?['body/LeaveType/Value']} request (@{triggerOutputs()?['body/WorkingDays']} days, @{formatDateTime(triggerOutputs()?['body/FromDate'], 'dd MMM')} – @{formatDateTime(triggerOutputs()?['body/ToDate'], 'dd MMM')}) was **rejected**. Reason: @{outputs('Post_Adaptive_Card_To_Manager')?['body/data/managerComment']}. You can revise and resubmit in the app."
+          }
+        }
+
+      ]
+    }
+
+  ]
+}
