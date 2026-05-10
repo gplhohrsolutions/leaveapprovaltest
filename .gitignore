@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.playwright-mcp/
+.claude/
+*.png
+*.jpg
+*.jpeg
